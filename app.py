@@ -97,20 +97,96 @@ st.markdown(
 # ---------------------------------------------------------
 # Hand Tracker Class (Cross-Platform)
 # ---------------------------------------------------------
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),        # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),        # index
+    (5, 9), (9, 10), (10, 11), (11, 12),   # middle
+    (9, 13), (13, 14), (14, 15), (15, 16), # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),# pinky
+    (0, 17)                                # palm base
+]
+
+def draw_skeleton(img, lm_list):
+    for start_idx, end_idx in HAND_CONNECTIONS:
+        if start_idx < len(lm_list) and end_idx < len(lm_list):
+            p1 = lm_list[start_idx]
+            p2 = lm_list[end_idx]
+            cv2.line(img, (p1[0], p1[1]), (p2[0], p2[1]), (0, 255, 128), 2)
+    for pt in lm_list:
+        cv2.circle(img, (pt[0], pt[1]), 4, (0, 200, 255), -1)
+        cv2.circle(img, (pt[0], pt[1]), 5, (255, 255, 255), 1)
+
+def get_model_path():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(current_dir, "hand_landmarker.task"),
+        os.path.join(current_dir, "Asphalt 8", "hand_landmarker.task"),
+        os.path.abspath("hand_landmarker.task"),
+    ]
+    for p in candidates:
+        if os.path.exists(p) and os.path.getsize(p) > 1000000:
+            return p
+
+    target = os.path.join(current_dir, "hand_landmarker.task")
+    url = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+    try:
+        import requests
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        if resp.status_code == 200:
+            with open(target, "wb") as f:
+                f.write(resp.content)
+            return target
+    except Exception:
+        pass
+
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(url, target)
+        return target
+    except Exception:
+        pass
+
+    return target
+
+
 class WebHandTracker:
     def __init__(self, detection_con=0.7):
         self.backend = None
+        self.error_msg = None
         self.detection_con = detection_con
+        model_path = get_model_path()
 
-        # Try cvzone HandDetector first
+        # 1. Primary: Direct MediaPipe Tasks API (modern mediapipe >= 0.10.0)
         try:
-            from cvzone.HandTrackingModule import HandDetector
-            self.detector = HandDetector(maxHands=2, detectionCon=self.detection_con)
-            self.backend = "cvzone"
-        except Exception:
-            pass
+            import mediapipe as mp
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
 
-        # Fallback to mediapipe solutions
+            if os.path.exists(model_path):
+                base_options = python.BaseOptions(model_asset_path=model_path)
+                options = vision.HandLandmarkerOptions(
+                    base_options=base_options,
+                    num_hands=2,
+                    running_mode=vision.RunningMode.IMAGE,
+                    min_hand_detection_confidence=float(self.detection_con),
+                    min_hand_presence_confidence=float(self.detection_con),
+                )
+                self.detector = vision.HandLandmarker.create_from_options(options)
+                self.backend = "mediapipe_tasks"
+        except Exception as e:
+            self.error_msg = str(e)
+
+        # 2. Secondary fallback: cvzone HandDetector
+        if self.backend is None:
+            try:
+                from cvzone.HandTrackingModule import HandDetector
+                self.detector = HandDetector(maxHands=2, detectionCon=float(self.detection_con))
+                self.backend = "cvzone"
+            except Exception as e:
+                if not self.error_msg:
+                    self.error_msg = str(e)
+
+        # 3. Tertiary fallback: legacy mediapipe solutions
         if self.backend is None:
             try:
                 import mediapipe as mp
@@ -119,37 +195,58 @@ class WebHandTracker:
                     self.hands = self.mp_hands.Hands(
                         static_image_mode=True,
                         max_num_hands=2,
-                        min_detection_confidence=self.detection_con,
+                        min_detection_confidence=float(self.detection_con),
                         min_tracking_confidence=0.5,
                     )
-                    self.mp_draw = mp.solutions.drawing_utils
                     self.backend = "mediapipe_solutions"
-            except Exception:
-                pass
+            except Exception as e:
+                if not self.error_msg:
+                    self.error_msg = str(e)
 
         if self.backend is None:
-            st.error("Could not initialize Hand Tracking engine (cvzone / mediapipe).")
+            st.error(f"Could not initialize Hand Tracking engine: {self.error_msg or 'Model could not be loaded'}")
 
     def find_hands(self, img, draw=True):
         hands_data = []
-        if self.backend == "cvzone":
+        if self.backend is None:
+            return hands_data, img
+
+        h, w, _ = img.shape
+        if self.backend == "mediapipe_tasks":
+            import mediapipe as mp
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            result = self.detector.detect(mp_image)
+
+            if result.hand_landmarks:
+                for hand_lms in result.hand_landmarks:
+                    lm_list = []
+                    for lm in hand_lms:
+                        cx, cy = int(lm.x * w), int(lm.y * h)
+                        lm_list.append((cx, cy))
+                    if draw:
+                        draw_skeleton(img, lm_list)
+                    hands_data.append({"lm_list": lm_list})
+
+        elif self.backend == "cvzone":
             cv_hands, img = self.detector.findHands(img, draw=draw, flipType=False)
-            for h in cv_hands:
-                lm_list = [(int(pt[0]), int(pt[1])) for pt in h["lmList"]]
+            for hnd in cv_hands:
+                lm_list = [(int(pt[0]), int(pt[1])) for pt in hnd["lmList"]]
                 hands_data.append({"lm_list": lm_list})
+
         elif self.backend == "mediapipe_solutions":
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             results = self.hands.process(img_rgb)
             if results.multi_hand_landmarks:
-                h_img, w_img, _ = img.shape
                 for hand_lms in results.multi_hand_landmarks:
                     lm_list = []
                     for lm in hand_lms.landmark:
-                        cx, cy = int(lm.x * w_img), int(lm.y * h_img)
+                        cx, cy = int(lm.x * w), int(lm.y * h)
                         lm_list.append((cx, cy))
                     if draw:
-                        self.mp_draw.draw_landmarks(img, hand_lms, self.mp_hands.HAND_CONNECTIONS)
+                        draw_skeleton(img, lm_list)
                     hands_data.append({"lm_list": lm_list})
+
         return hands_data, img
 
     def analyze_hand(self, hand):
@@ -360,6 +457,11 @@ def process_gesture_frame(tracker, hud, image_bgr, deadzone=12, draw_landmarks=T
     return annotated, telemetry
 
 
+@st.cache_resource
+def load_tracker(detection_con):
+    return WebHandTracker(detection_con=detection_con)
+
+
 # ---------------------------------------------------------
 # Streamlit Web App Interface
 # ---------------------------------------------------------
@@ -393,7 +495,7 @@ def main():
         )
 
     # Initialize Tracker & HUD
-    tracker = WebHandTracker(detection_con=detection_con)
+    tracker = load_tracker(detection_con)
     hud = StreamlitHUD()
 
     # ---------------------------------------------------------
