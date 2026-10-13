@@ -351,17 +351,28 @@ class Asphalt8Controller:
         self.running = False
 
     def init_camera(self):
-        # Try default backend first
-        self.cap = cv2.VideoCapture(self.cam_index)
-        if not self.cap.isOpened():
-            # Fall back to Windows DirectShow backend
+        # On Windows, DirectShow is far more reliable and avoids Media Foundation locking
+        if sys.platform == "win32":
             self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(self.cam_index)
 
-        if not self.cap.isOpened():
+        if not self.cap or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.cam_index)
+
+        if not self.cap or not self.cap.isOpened():
             return False
 
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Warm up camera by reading initial frames
+        for _ in range(5):
+            ret, _ = self.cap.read()
+            if ret:
+                break
+            time.sleep(0.05)
+
         return True
 
     def press(self, keys):
@@ -401,12 +412,18 @@ class Asphalt8Controller:
         print("[SUCCESS] Controller Started! Focus on your online web game or Asphalt window.")
 
         prev_time = time.time()
+        consecutive_failures = 0
         try:
             while self.running:
                 success, img = self.cap.read()
                 if not success:
-                    print("[WARNING] Failed to read frame from webcam.")
-                    break
+                    consecutive_failures += 1
+                    if consecutive_failures > 15:
+                        print("[WARNING] Failed to read frame from webcam.")
+                        break
+                    time.sleep(0.03)
+                    continue
+                consecutive_failures = 0
 
                 img = cv2.flip(img, 1)
                 hands, img = self.tracker.find_hands(img)
