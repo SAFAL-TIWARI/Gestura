@@ -4,8 +4,12 @@ import time
 import math
 import os
 import sys
-import tkinter as tk
-from tkinter import messagebox
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except (ImportError, Exception):
+    tk = None
+    messagebox = None
 
 # Ensure the Asphalt 8 directory is in sys.path so directkeys imports reliably
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -380,13 +384,17 @@ class Asphalt8Controller:
     def start(self):
         if not self.init_camera():
             print("[ERROR] Could not open webcam! Please verify camera is connected.")
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror(
-                "Camera Error",
-                "Could not access webcam. Please make sure your camera is connected and not used by another application.",
-            )
-            root.destroy()
+            if tk is not None:
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    messagebox.showerror(
+                        "Camera Error",
+                        "Could not access webcam. Please make sure your camera is connected and not used by another application.",
+                    )
+                    root.destroy()
+                except Exception:
+                    pass
             return
 
         self.running = True

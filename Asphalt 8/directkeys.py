@@ -7,8 +7,12 @@ try:
 except Exception:
     _pynput_kb = None
 
-user32 = ctypes.windll.user32
-SendInput = user32.SendInput
+try:
+    user32 = ctypes.windll.user32
+    SendInput = user32.SendInput
+except (AttributeError, Exception):
+    user32 = None
+    SendInput = None
 MAPVK_VSC_TO_VK = 1
 
 # Hardware Scan Codes
@@ -90,18 +94,19 @@ def PressKey(hexKeyCode):
                 pass
 
     # 2. Dispatch via native Windows SendInput with mapped virtual key code
-    try:
-        vk = user32.MapVirtualKeyA(hexKeyCode, MAPVK_VSC_TO_VK)
-        extra = ctypes.c_ulong(0)
-        ii_ = Input_I()
-        flags = 0x0008  # KEYEVENTF_SCANCODE
-        if hexKeyCode in EXTENDED_KEYS:
-            flags |= 0x0001  # KEYEVENTF_EXTENDEDKEY
-        ii_.ki = KeyBdInput(vk, hexKeyCode, flags, 0, ctypes.pointer(extra))
-        x = Input(ctypes.c_ulong(1), ii_)
-        SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
-    except Exception:
-        pass
+    if user32 is not None and SendInput is not None:
+        try:
+            vk = user32.MapVirtualKeyA(hexKeyCode, MAPVK_VSC_TO_VK)
+            extra = ctypes.c_ulong(0)
+            ii_ = Input_I()
+            flags = 0x0008  # KEYEVENTF_SCANCODE
+            if hexKeyCode in EXTENDED_KEYS:
+                flags |= 0x0001  # KEYEVENTF_EXTENDEDKEY
+            ii_.ki = KeyBdInput(vk, hexKeyCode, flags, 0, ctypes.pointer(extra))
+            x = Input(ctypes.c_ulong(1), ii_)
+            SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+        except Exception:
+            pass
 
 def ReleaseKey(hexKeyCode):
     """
@@ -117,18 +122,19 @@ def ReleaseKey(hexKeyCode):
                 pass
 
     # 2. Release via native Windows SendInput
-    try:
-        vk = user32.MapVirtualKeyA(hexKeyCode, MAPVK_VSC_TO_VK)
-        extra = ctypes.c_ulong(0)
-        ii_ = Input_I()
-        flags = 0x0008 | 0x0002  # KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP
-        if hexKeyCode in EXTENDED_KEYS:
-            flags |= 0x0001  # KEYEVENTF_EXTENDEDKEY
-        ii_.ki = KeyBdInput(vk, hexKeyCode, flags, 0, ctypes.pointer(extra))
-        x = Input(ctypes.c_ulong(1), ii_)
-        SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
-    except Exception:
-        pass
+    if user32 is not None and SendInput is not None:
+        try:
+            vk = user32.MapVirtualKeyA(hexKeyCode, MAPVK_VSC_TO_VK)
+            extra = ctypes.c_ulong(0)
+            ii_ = Input_I()
+            flags = 0x0008 | 0x0002  # KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP
+            if hexKeyCode in EXTENDED_KEYS:
+                flags |= 0x0001  # KEYEVENTF_EXTENDEDKEY
+            ii_.ki = KeyBdInput(vk, hexKeyCode, flags, 0, ctypes.pointer(extra))
+            x = Input(ctypes.c_ulong(1), ii_)
+            SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     while True:
