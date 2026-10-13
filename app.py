@@ -1,10 +1,18 @@
 import os
 import sys
 import math
+import time
 import cv2
 import numpy as np
 from PIL import Image
 import streamlit as st
+
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+    import av
+    WEBRTC_AVAILABLE = True
+except Exception:
+    WEBRTC_AVAILABLE = False
 
 # Configure Streamlit Page
 st.set_page_config(
@@ -463,6 +471,58 @@ def load_tracker(detection_con):
 
 
 # ---------------------------------------------------------
+# Real-Time WebRTC Video Stream Processor
+# ---------------------------------------------------------
+if WEBRTC_AVAILABLE:
+    RTC_CONFIG = RTCConfiguration(
+        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    )
+
+    class LiveHUDVideoProcessor(VideoProcessorBase):
+        def __init__(self):
+            self.deadzone = 12
+            self.draw_landmarks = True
+            self.hud = StreamlitHUD()
+            self.tracker = None
+            self.prev_time = time.time()
+
+        def set_params(self, deadzone, draw_landmarks, tracker):
+            self.deadzone = deadzone
+            self.draw_landmarks = draw_landmarks
+            self.tracker = tracker
+
+        def recv(self, frame):
+            img = frame.to_ndarray(format="bgr24")
+            # Flip image horizontally for natural mirror behavior
+            img = cv2.flip(img, 1)
+
+            if self.tracker is None:
+                self.tracker = load_tracker(0.7)
+
+            processed_img, telemetry = process_gesture_frame(
+                self.tracker, self.hud, img, deadzone=self.deadzone, draw_landmarks=self.draw_landmarks
+            )
+
+            # Draw live FPS counter
+            curr_time = time.time()
+            time_diff = curr_time - self.prev_time
+            fps = 1.0 / time_diff if time_diff > 0 else 0
+            self.prev_time = curr_time
+            h, w, _ = processed_img.shape
+            cv2.putText(
+                processed_img,
+                f"FPS: {int(fps)}",
+                (w - 110, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+            )
+
+            return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
+
+
+# ---------------------------------------------------------
 # Streamlit Web App Interface
 # ---------------------------------------------------------
 def main():
@@ -502,85 +562,101 @@ def main():
     # TAB 1: Camera Gesture Tester (Webcam)
     # ---------------------------------------------------------
     if app_mode == "📷 Camera Gesture Tester":
-        st.info("💡 Grant camera permission in your browser. Hold up one or both hands to test the virtual steering wheel and gestures!")
-        
-        img_file = st.camera_input("Take a photo to test gesture detection & HUD overlay")
+        tab_live, tab_snapshot = st.tabs(["🎥 Real-Time Live HUD (30 FPS)", "📸 Snapshot Photo Tester"])
 
-        if img_file is not None:
-            bytes_data = img_file.getvalue()
-            cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-            # Flip horizontally for natural mirror behavior
-            cv_img = cv2.flip(cv_img, 1)
-
-            with st.spinner("Analyzing gestures..."):
-                processed_img, telemetry = process_gesture_frame(
-                    tracker, hud, cv_img, deadzone=deadzone, draw_landmarks=draw_landmarks
+        with tab_live:
+            st.info("💡 Click **START** below to start your live camera feed with real-time steering wheel and telemetry HUD overlays!")
+            if WEBRTC_AVAILABLE:
+                webrtc_ctx = webrtc_streamer(
+                    key="gestura-live-hud",
+                    video_processor_factory=LiveHUDVideoProcessor,
+                    rtc_configuration=RTC_CONFIG,
+                    media_stream_constraints={"video": True, "audio": False},
                 )
-                rgb_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
+                if webrtc_ctx.video_processor:
+                    webrtc_ctx.video_processor.set_params(deadzone, draw_landmarks, tracker)
+            else:
+                st.warning("Live WebRTC module is currently initializing. Please use the Snapshot Photo Tester tab.")
 
-            col1, col2 = st.columns([1.6, 1.0])
-            with col1:
-                st.subheader("HUD Video Output")
-                st.image(rgb_img, use_container_width=True)
+        with tab_snapshot:
+            st.info("💡 Grant camera permission, hold up your hands, and click **Take Photo** to analyze static gestures and HUD.")
+            img_file = st.camera_input("Take a photo to test gesture detection & HUD overlay")
 
-            with col2:
-                st.subheader("📊 Live Telemetry")
-                
-                # Steering Card
-                steer_class = "telemetry-value-active" if "STRAIGHT" not in telemetry["steering"] else "telemetry-value-idle"
-                st.markdown(
-                    f"""
-                    <div class="telemetry-card">
-                        <div class="telemetry-label">🕹️ Steering Position</div>
-                        <div class="{steer_class}">{telemetry['steering']}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            if img_file is not None:
+                bytes_data = img_file.getvalue()
+                cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+                # Flip horizontally for natural mirror behavior
+                cv_img = cv2.flip(cv_img, 1)
 
-                # Throttle Card
-                accel_class = "telemetry-value-active" if telemetry["accel"] else "telemetry-value-idle"
-                accel_text = "ACCELERATING (W / Up Arrow)" if telemetry["accel"] else "OFF"
-                st.markdown(
-                    f"""
-                    <div class="telemetry-card">
-                        <div class="telemetry-label">🏎️ Throttle (Gas)</div>
-                        <div class="{accel_class}">{accel_text}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                with st.spinner("Analyzing gestures..."):
+                    processed_img, telemetry = process_gesture_frame(
+                        tracker, hud, cv_img, deadzone=deadzone, draw_landmarks=draw_landmarks
+                    )
+                    rgb_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
 
-                # Brake Card
-                brake_class = "telemetry-value-brake" if telemetry["brake"] else "telemetry-value-idle"
-                brake_text = "BRAKING / REVERSE (S / Down Arrow)" if telemetry["brake"] else "OFF"
-                st.markdown(
-                    f"""
-                    <div class="telemetry-card">
-                        <div class="telemetry-label">🛑 Brake / Reverse</div>
-                        <div class="{brake_class}">{brake_text}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                col1, col2 = st.columns([1.6, 1.0])
+                with col1:
+                    st.subheader("HUD Video Output")
+                    st.image(rgb_img, use_container_width=True)
 
-                # Nitro Card
-                nitro_class = "telemetry-value-nitro" if telemetry["nitro"] else "telemetry-value-idle"
-                nitro_text = "NITRO BOOST (Spacebar / Shift)" if telemetry["nitro"] else "OFF"
-                st.markdown(
-                    f"""
-                    <div class="telemetry-card">
-                        <div class="telemetry-label">⚡ Nitro Boost</div>
-                        <div class="{nitro_class}">{nitro_text}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                with col2:
+                    st.subheader("📊 Live Telemetry")
+                    
+                    # Steering Card
+                    steer_class = "telemetry-value-active" if "STRAIGHT" not in telemetry["steering"] else "telemetry-value-idle"
+                    st.markdown(
+                        f"""
+                        <div class="telemetry-card">
+                            <div class="telemetry-label">🕹️ Steering Position</div>
+                            <div class="{steer_class}">{telemetry['steering']}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-                # Mode & Keys
-                st.caption(f"**Controller Mode**: `{telemetry['mode']}` | **Hands Detected**: `{telemetry['hands_detected']}`")
-                if telemetry["keys"]:
-                    st.success(f"**Dispatched Keys**: {', '.join(telemetry['keys'])}")
+                    # Throttle Card
+                    accel_class = "telemetry-value-active" if telemetry["accel"] else "telemetry-value-idle"
+                    accel_text = "ACCELERATING (W / Up Arrow)" if telemetry["accel"] else "OFF"
+                    st.markdown(
+                        f"""
+                        <div class="telemetry-card">
+                            <div class="telemetry-label">🏎️ Throttle (Gas)</div>
+                            <div class="{accel_class}">{accel_text}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # Brake Card
+                    brake_class = "telemetry-value-brake" if telemetry["brake"] else "telemetry-value-idle"
+                    brake_text = "BRAKING / REVERSE (S / Down Arrow)" if telemetry["brake"] else "OFF"
+                    st.markdown(
+                        f"""
+                        <div class="telemetry-card">
+                            <div class="telemetry-label">🛑 Brake / Reverse</div>
+                            <div class="{brake_class}">{brake_text}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # Nitro Card
+                    nitro_class = "telemetry-value-nitro" if telemetry["nitro"] else "telemetry-value-idle"
+                    nitro_text = "NITRO BOOST (Spacebar / Shift)" if telemetry["nitro"] else "OFF"
+                    st.markdown(
+                        f"""
+                        <div class="telemetry-card">
+                            <div class="telemetry-label">⚡ Nitro Boost</div>
+                            <div class="{nitro_class}">{nitro_text}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # Mode & Keys
+                    st.caption(f"**Controller Mode**: `{telemetry['mode']}` | **Hands Detected**: `{telemetry['hands_detected']}`")
+                    if telemetry["keys"]:
+                        st.success(f"**Dispatched Keys**: {', '.join(telemetry['keys'])}")
 
     # ---------------------------------------------------------
     # TAB 2: Image Upload Tester
